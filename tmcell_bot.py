@@ -1,364 +1,937 @@
 import logging
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes
-import requests
-from bs4 import BeautifulSoup
-import time
-import os
-import re
-import json
-import asyncio
 from datetime import datetime
+from telegram import Update, ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes, ConversationHandler
+from flask import Flask
+import threading
+import time
+import re
+import random
+import string
 
-# ===== ВАШИ ДАННЫЕ ДЛЯ 3 НОМЕРОВ =====
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "7635918525:AAFp6g0sna1Mq59NiaWVk_tdHq8O5P9_3HY")
+# ========== ВЕБ-СЕРВЕР ДЛЯ RENDER ==========
+app = Flask(__name__)
 
-# Номер 1
-LOGIN1 = "62489636"
-PASSWORD1 = "5873W295"
+@app.route('/')
+def home():
+    return "✅ Astra Kassa Bot işleýär 24/7!"
 
-# Номер 2
-LOGIN2 = "61416500"
-PASSWORD2 = "W16G8SL1"
+@app.route('/ping')
+def ping():
+    return "🏓 Pong"
 
-# Номер 3
-LOGIN3 = "65136133"
-PASSWORD3 = "L6GL4279"
-# ======================================
+def run_flask():
+    app.run(host='0.0.0.0', port=10000, debug=False, use_reloader=False)
 
-# Файл для хранения предыдущих балансов
-BALANCE_FILE = "balances.json"
+# ========== НАСТРОЙКИ БОТА ==========
+BOT_TOKEN = "8741918027:AAEqpPPZBDO54UZcmxyJb_U4gfuVqc97j5w"
+GROUP_CHAT_ID = -1003759188641
+ADMIN_GROUP_ID = -1003759188641
+SUPPORT_USERNAME = "@astra_kassa"
 
-logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
-    level=logging.INFO
-)
+# ID администраторов (замените на свой)
+ADMIN_IDS = [8444800411]  # Ваш Telegram ID
+
+# Состояния
+(ASK_CLIENT, REG_PHONE, REG_PARIKARA_ID, LOGIN_PHONE, LOGIN_PASSWORD,
+ PHONE_INPUT, AMOUNT_INPUT, WITHDRAW_PHONE_INPUT, 
+ WITHDRAW_AMOUNT_INPUT, WITHDRAW_RECEIPT_INPUT) = range(10)
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def load_balances():
-    """Загружает сохраненные балансы из файла"""
-    try:
-        if os.path.exists(BALANCE_FILE):
-            with open(BALANCE_FILE, 'r', encoding='utf-8') as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Ошибка загрузки балансов: {e}")
-    return {}
+# Хранилище
+user_data = {}
+applications = {}
+app_counter = 1000
+registered_users = {}  # Подтверждённые пользователи (могут пользоваться ботом)
+pending_users = {}     # Ожидают подтверждения
 
-def save_balances(balances):
-    """Сохраняет балансы в файл"""
-    try:
-        with open(BALANCE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(balances, f, ensure_ascii=False, indent=2)
-    except Exception as e:
-        logger.error(f"Ошибка сохранения балансов: {e}")
+# ========== ФУНКЦИИ ==========
+def validate_parikara_id(text):
+    return re.match(r'^\d+$', text) is not None
 
-def get_tmcell_balance(login, password):
-    """Функция для получения баланса для конкретного номера"""
-    session = requests.Session()
+def validate_amount(text):
+    if re.match(r'^\d+$', text):
+        amount = int(text)
+        if amount >= 30:
+            return True
+    return False
+
+def validate_phone(text):
+    clean_text = re.sub(r'[\s\-\(\)]', '', text)
+    if re.match(r'^\+993\d{8}$', clean_text):
+        return True
+    elif re.match(r'^993\d{8}$', clean_text):
+        return True
+    elif re.match(r'^\d{8}$', clean_text):
+        return True
+    return False
+
+def format_phone(text):
+    clean_text = re.sub(r'[\s\-\(\)]', '', text)
+    if re.match(r'^\d{8}$', clean_text):
+        return f"+993 {clean_text[:2]} {clean_text[2:5]} {clean_text[5:]}"
+    elif re.match(r'^993\d{8}$', clean_text):
+        return f"+{clean_text[:3]} {clean_text[3:5]} {clean_text[5:8]} {clean_text[8:]}"
+    elif re.match(r'^\+993\d{8}$', clean_text):
+        return f"+993 {clean_text[4:6]} {clean_text[6:9]} {clean_text[9:]}"
+    return text
+
+def generate_password():
+    return ''.join(random.choices(string.digits, k=6))
+
+def reset_user_data(user_id):
+    if user_id in user_data:
+        del user_data[user_id]
+
+def is_registered(user_id):
+    """Проверяет, есть ли пользователь в registered_users (подтверждённых)"""
+    return user_id in registered_users
+
+# ========== START ==========
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
     
-    try:
-        login_url = "https://hyzmat.tmcell.tm/"
-        auth_url = "https://hyzmat.tmcell.tm/User"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
-            'Content-Type': 'application/x-www-form-urlencoded',
-            'Origin': 'https://hyzmat.tmcell.tm',
-            'Referer': 'https://hyzmat.tmcell.tm/',
-        }
-        
-        # Получаем токен
-        main_page = session.get(login_url, headers=headers)
-        time.sleep(1)
-        
-        soup = BeautifulSoup(main_page.text, 'html.parser')
-        token_input = soup.find('input', {'name': '__RequestVerificationToken'})
-        verification_token = token_input.get('value', '') if token_input else ""
-        
-        # Вход с конкретным логином/паролем
-        login_data = {
-            '__RequestVerificationToken': verification_token,
-            'login': login,
-            'password': password,
-        }
-        
-        login_response = session.post(auth_url, data=login_data, headers=headers, allow_redirects=True)
-        
-        if login_response.status_code != 200:
-            return None, None, f"Ошибка входа: код {login_response.status_code}"
-        
-        # Ищем баланс
-        soup = BeautifulSoup(login_response.text, 'html.parser')
-        
-        for element in soup.find_all(['div', 'span', 'td', 'p', 'h3', 'label', 'strong']):
-            if element.text and ('Баланс контракта' in element.text):
-                balance_text = element.text.strip()
-                
-                # Извлекаем сумму
-                amount_match = re.search(r'([\d]+,[\d]+)', balance_text)
-                if amount_match:
-                    amount_str = amount_match.group(1).replace(',', '.')
-                    amount = float(amount_str)
-                    return amount, balance_text, None
-                return None, balance_text, None
-        
-        return None, None, "Не удалось найти баланс"
-            
-    except Exception as e:
-        logger.error(f"Ошибка: {str(e)}")
-        return None, None, f"Ошибка: {str(e)}"
-
-async def check_balances(context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет балансы всех номеров и отправляет уведомления о пополнениях"""
-    chat_id = context.job.chat_id
-    saved_balances = load_balances()
+    # Очищаем контекст при новом старте
+    context.user_data.clear()
     
-    numbers = [
-        {"name": "Номер 1", "login": LOGIN1, "password": PASSWORD1, "full": f"993{LOGIN1}"},
-        {"name": "Номер 2", "login": LOGIN2, "password": PASSWORD2, "full": f"993{LOGIN2}"},
-        {"name": "Номер 3", "login": LOGIN3, "password": PASSWORD3, "full": f"993{LOGIN3}"},
+    # Если пользователь уже подтверждён - показываем меню
+    if is_registered(user_id):
+        return await show_main_menu(update, context)
+    
+    # Если пользователь в ожидании (pending)
+    if user_id in pending_users:
+        await update.message.reply_text(
+            f"⏳ Siz eýýäm registrasiýa etdiňiz.\n"
+            f"Parolyňyz admin tarapyndan barlanylýar.\n"
+            f"Habarlaşmak üçin: {SUPPORT_USERNAME}\n\n"
+            f"⚠️ Eger-de siz paroly eýýäm alan bolsaňyz, /giris ýazyň"
+        )
+        return ConversationHandler.END
+    
+    # Новый пользователь - спрашиваем
+    keyboard = [
+        [KeyboardButton("✅ Hawa, men müşderi")],
+        [KeyboardButton("❌ Ýok, täze registrasiýa")]
     ]
     
-    notifications = []
-    
-    for number in numbers:
-        try:
-            amount, full_text, error = get_tmcell_balance(number["login"], number["password"])
-            
-            if error or amount is None:
-                logger.error(f"Ошибка для {number['name']}: {error}")
-                continue
-            
-            # Получаем предыдущий баланс
-            prev_amount = saved_balances.get(number["login"])
-            
-            # Сохраняем новый баланс
-            saved_balances[number["login"]] = amount
-            
-            # Если есть предыдущий баланс и новый больше
-            if prev_amount is not None:
-                difference = amount - prev_amount
-                
-                # Если баланс увеличился на 20 или более манат
-                if difference >= 20.0:
-                    time_str = datetime.now().strftime("%d.%m.%Y %H:%M")
-                    notifications.append(
-                        f"📈 <b>{number['name']} ({number['full']})</b>\n"
-                        f"Пополнение: +{difference:.2f} manat\n"
-                        f"Текущий баланс: {amount:.2f} manat\n"
-                        f"🕐 {time_str}"
-                    )
-            
-        except Exception as e:
-            logger.error(f"Ошибка проверки {number['name']}: {e}")
-    
-    # Сохраняем обновленные балансы
-    save_balances(saved_balances)
-    
-    # Отправляем уведомления, если есть
-    if notifications:
-        message = "🔔 <b>Обнаружены пополнения баланса!</b>\n\n" + "\n\n".join(notifications)
-        await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
-
-async def balance1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Баланс для номера 1"""
-    await update.message.reply_text("🔍 Проверяю баланс для номера 1...")
-    
-    amount, full_text, error = get_tmcell_balance(LOGIN1, PASSWORD1)
-    
-    if error:
-        await update.message.reply_text(f"❌ Номер 1: {error}")
-    else:
-        if amount:
-            await update.message.reply_text(
-                f"📱 <b>Номер 1: 993{LOGIN1}</b>\n"
-                f"💰 {amount:.2f} manat",
-                parse_mode="HTML"
-            )
-        else:
-            clean_balance = full_text.replace("Баланс контракта:", "").strip()
-            await update.message.reply_text(f"📱 Номер 1: 993{LOGIN1}\n💰 {clean_balance}")
-
-async def balance2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Баланс для номера 2"""
-    await update.message.reply_text("🔍 Проверяю баланс для номера 2...")
-    
-    amount, full_text, error = get_tmcell_balance(LOGIN2, PASSWORD2)
-    
-    if error:
-        await update.message.reply_text(f"❌ Номер 2: {error}")
-    else:
-        if amount:
-            await update.message.reply_text(
-                f"📱 <b>Номер 2: 993{LOGIN2}</b>\n"
-                f"💰 {amount:.2f} manat",
-                parse_mode="HTML"
-            )
-        else:
-            clean_balance = full_text.replace("Баланс контракта:", "").strip()
-            await update.message.reply_text(f"📱 Номер 2: 993{LOGIN2}\n💰 {clean_balance}")
-
-async def balance3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Баланс для номера 3"""
-    await update.message.reply_text("🔍 Проверяю баланс для номера 3...")
-    
-    amount, full_text, error = get_tmcell_balance(LOGIN3, PASSWORD3)
-    
-    if error:
-        await update.message.reply_text(f"❌ Номер 3: {error}")
-    else:
-        if amount:
-            await update.message.reply_text(
-                f"📱 <b>Номер 3: 993{LOGIN3}</b>\n"
-                f"💰 {amount:.2f} manat",
-                parse_mode="HTML"
-            )
-        else:
-            clean_balance = full_text.replace("Баланс контракта:", "").strip()
-            await update.message.reply_text(f"📱 Номер 3: 993{LOGIN3}\n💰 {clean_balance}")
-
-async def balance_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверить баланс всех трёх номеров"""
-    msg = await update.message.reply_text("🔄 Проверяю все номера...")
-    
-    results = []
-    saved_balances = load_balances()
-    
-    # Номер 1
-    amount1, _, error1 = get_tmcell_balance(LOGIN1, PASSWORD1)
-    if error1:
-        results.append(f"❌ Номер 1: {error1}")
-    else:
-        results.append(f"✅ Номер 1: {amount1:.2f} manat")
-        saved_balances[LOGIN1] = amount1
-    
-    # Номер 2
-    amount2, _, error2 = get_tmcell_balance(LOGIN2, PASSWORD2)
-    if error2:
-        results.append(f"❌ Номер 2: {error2}")
-    else:
-        results.append(f"✅ Номер 2: {amount2:.2f} manat")
-        saved_balances[LOGIN2] = amount2
-    
-    # Номер 3
-    amount3, _, error3 = get_tmcell_balance(LOGIN3, PASSWORD3)
-    if error3:
-        results.append(f"❌ Номер 3: {error3}")
-    else:
-        results.append(f"✅ Номер 3: {amount3:.2f} manat")
-        saved_balances[LOGIN3] = amount3
-    
-    # Сохраняем балансы
-    save_balances(saved_balances)
-    
-    # Отправляем общий результат
-    final_message = "📊 <b>Балансы всех номеров</b>\n\n" + "\n".join(results)
-    await msg.edit_text(final_message, parse_mode="HTML")
-
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда старт с описанием"""
     await update.message.reply_text(
-        "👋 <b>Бот баланса TMCell с отслеживанием пополнений</b>\n\n"
-        "Команды:\n"
-        "/balance1 - баланс номера 99362489636\n"
-        "/balance2 - баланс номера 99361416500\n"
-        "/balance3 - баланс номера 99365136133\n"
-        "/all - баланс всех номеров сразу\n"
-        "/track - включить отслеживание пополнений\n"
-        "/stop - выключить отслеживание\n"
-        "/status - проверить статус отслеживания",
-        parse_mode="HTML"
+        "Siz Astra Kassa müşderisimi? 🤔",
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
     )
+    return ASK_CLIENT
 
-async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Включает отслеживание пополнений"""
-    chat_id = update.effective_chat.id
+async def show_main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Показывает главное меню для подтверждённых пользователей"""
+    user = update.effective_user
     
-    # Удаляем старые задачи для этого чата
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-    for job in current_jobs:
-        job.schedule_removal()
+    keyboard = [
+        [KeyboardButton("💰 Hasaby doldurmak")],
+        [KeyboardButton("💸 Pul çykarmak")],
+        [KeyboardButton("🆘 Ýardam")]
+    ]
     
-    # Создаем новую задачу - проверка каждые 15 минут
-    context.job_queue.run_repeating(
-        check_balances,
-        interval=900,  # 15 минут
-        first=10,
-        chat_id=chat_id,
-        name=str(chat_id)
+    welcome_text = (
+        f"Hoş geldiňiz, {user.first_name}! 🤖\n\n"
+        "Astra Kassa botyna hoş geldiňiz.\n"
+        "Hasaby doldurmak ýa-da pul çykarmak üçin aşakdaky düwmeleri ulanyň."
     )
-    
-    # Сразу проверим балансы для инициализации
-    await check_balances(context.job_queue.jobs()[0] if context.job_queue.jobs() else None)
     
     await update.message.reply_text(
-        "✅ <b>Отслеживание пополнений включено!</b>\n"
-        "Я буду проверять баланс каждые 15 минут.\n"
-        "Если баланс увеличится на 20+ manat - сразу сообщу.",
-        parse_mode="HTML"
+        welcome_text,
+        reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     )
+    return ConversationHandler.END
 
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выключает отслеживание пополнений"""
-    chat_id = update.effective_chat.id
+# ========== ОТВЕТ НА ВОПРОС ==========
+async def handle_client_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text
     
-    # Удаляем задачи для этого чата
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-    for job in current_jobs:
-        job.schedule_removal()
-    
-    await update.message.reply_text("🔕 <b>Отслеживание пополнений выключено</b>", parse_mode="HTML")
-
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет статус отслеживания"""
-    chat_id = update.effective_chat.id
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-    
-    if current_jobs:
+    if text == "✅ Hawa, men müşderi":
         await update.message.reply_text(
-            "✅ <b>Отслеживание активно</b>\n"
-            "Проверка каждые 15 минут",
-            parse_mode="HTML"
+            "📝 <b>GIRIŞ</b>\n\n"
+            "Telefon nomeriňizi ýazyň:\n"
+            "(Mysal: +99365123456 ýa-da 65123456)",
+            parse_mode='HTML'
         )
+        return LOGIN_PHONE
+    
+    elif text == "❌ Ýok, täze registrasiýa":
+        await update.message.reply_text(
+            "📝 <b>TÄZE REGISTRASIÝA</b>\n\n"
+            "Telefon nomeriňizi ýazyň:\n"
+            "(Mysal: +99365123456 ýa-da 65123456)",
+            parse_mode='HTML'
+        )
+        return REG_PHONE
+    
+    else:
+        await update.message.reply_text("Düwmeleri ulanyň!")
+        return ASK_CLIENT
+
+# ========== ВХОД ==========
+async def login_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if validate_phone(text):
+        phone = format_phone(text)
+        context.user_data['login_phone'] = phone
+        context.user_data['login_attempts'] = 0
+        
+        await update.message.reply_text(
+            f"✅ Telefon nomeri kabul edildi\n\n"
+            "🔑 Indi parolyňyzy ýazyň:"
+        )
+        return LOGIN_PASSWORD
     else:
         await update.message.reply_text(
-            "❌ <b>Отслеживание не активно</b>\n"
-            "Используй /track чтобы включить",
-            parse_mode="HTML"
+            "❌ Ýalňyş format!\n"
+            "Dogry format: +99365123456 ýa-da 65123456\n"
+            "Täzeden ýazyň:"
         )
+        return LOGIN_PHONE
 
-def main():
-    """Запуск бота"""
-    if not BOT_TOKEN:
-        print("❌ Ошибка: не указан токен бота!")
+async def login_password(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    password = update.message.text.strip()
+    
+    if 'login_attempts' not in context.user_data:
+        context.user_data['login_attempts'] = 0
+    context.user_data['login_attempts'] += 1
+    
+    if 'login_phone' not in context.user_data:
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    login_phone = context.user_data['login_phone']
+    
+    # Ищем пользователя с таким телефоном в registered_users (подтверждённых)
+    found_user = None
+    for uid, data in registered_users.items():
+        if data['phone'] == login_phone:
+            found_user = data
+            break
+    
+    if found_user and found_user['password'] == password:
+        # Правильный пароль - даем доступ
+        context.user_data.clear()
+        # Если пользователь заходит с другого устройства, сохраняем его ID
+        if user_id not in registered_users:
+            registered_users[user_id] = found_user
+        
+        await update.message.reply_text("✅ Giriş üstünlikli!")
+        return await show_main_menu(update, context)
+    else:
+        # Неправильный пароль
+        attempts = context.user_data['login_attempts']
+        
+        if attempts >= 5:
+            await update.message.reply_text(
+                f"❌ 5 gezek ýalňyş parol!\n"
+                f"Hasabyňyz wagtlaýyn blokirlendi.\n"
+                f"Ýardam: {SUPPORT_USERNAME}"
+            )
+            context.user_data.clear()
+            return ConversationHandler.END
+        else:
+            remaining = 5 - attempts
+            await update.message.reply_text(
+                f"❌ Ýalňyş parol! {remaining} gezek synanyşyk galdy.\n"
+                f"🔑 Parolyňyzy täzeden ýazyň:"
+            )
+            return LOGIN_PASSWORD
+
+# ========== РЕГИСТРАЦИЯ: ТЕЛЕФОН ==========
+async def reg_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if validate_phone(text):
+        phone = format_phone(text)
+        user_data[user_id] = {'phone': phone}
+        
+        await update.message.reply_text(
+            f"✅ Telefon nomeri kabul edildi: {phone}\n\n"
+            "📝 Indi Parikara ID-nizi ýazyň:\n"
+            "(Diňe sanlar)"
+        )
+        return REG_PARIKARA_ID
+    else:
+        await update.message.reply_text(
+            "❌ Ýalňyş format!\n"
+            "Dogry format: +99365123456 ýa-da 65123456\n"
+            "Täzeden ýazyň:"
+        )
+        return REG_PHONE
+
+# ========== РЕГИСТРАЦИЯ: PARIKARA ID ==========
+async def reg_parikara_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if user_id not in user_data or 'phone' not in user_data[user_id]:
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if validate_parikara_id(text):
+        parikara_id = text
+        phone = user_data[user_id]['phone']
+        password = generate_password()
+        user = update.effective_user
+        username = user.username or "ýok"
+        
+        # Сохраняем в pending_users (ожидают подтверждения)
+        pending_users[user_id] = {
+            'user_id': user_id,
+            'username': username,
+            'first_name': user.first_name,
+            'phone': phone,
+            'parikara_id': parikara_id,
+            'password': password,
+            'registered_date': datetime.now().strftime("%d.%m.%Y %H:%M")
+        }
+        
+        # Отправляем пароль в группу админу
+        admin_message = (
+            f"🆕 <b>TÄZE REGISTRASIÝA</b>\n\n"
+            f"👤 Ulanyjy: @{username}\n"
+            f"📝 Ady: {user.first_name}\n"
+            f"📞 Telefon: {phone}\n"
+            f"🆔 Parikara ID: {parikara_id}\n"
+            f"🔑 PAROL: <code>{password}</code>\n"
+            f"⏰ Wagt: {pending_users[user_id]['registered_date']}\n\n"
+            f"✅ Tassyklamak üçin:\n"
+            f"/confirm {phone}\n\n"
+            f"⚠️ <b>PAROLY DIŇE MÜŞDERÄ BERIŇ!</b>"
+        )
+        
+        await context.bot.send_message(
+            chat_id=ADMIN_GROUP_ID,
+            text=admin_message,
+            parse_mode='HTML'
+        )
+        
+        # Клиенту - только информация, НИКАКИХ КНОПОК
+        await update.message.reply_text(
+            f"✅ <b>REGISTRASIÝA ÜSTÜNLIKLI</b>\n\n"
+            f"📞 Siziň loginiňiz: {phone}\n\n"
+            f"🔐 <b>PAROLYŇYZ ADMINDA</b>\n"
+            f"Parolyňyzy almak üçin admin bilen habarlaşyň:\n"
+            f"{SUPPORT_USERNAME}\n\n"
+            f"⚠️ <b>Paroly alanyňyzdan soň, /start basyp giriň.</b>",
+            parse_mode='HTML'
+        )
+        
+        # Очищаем временные данные
+        del user_data[user_id]
+        
+        # Завершаем разговор - пользователь НЕ ПОЛУЧАЕТ ДОСТУП
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "❌ Ýalňyş! Diňe san giriziň.\n"
+            "Parikara ID-nizi täzeden ýazyň:"
+        )
+        return REG_PARIKARA_ID
+
+# ========== АДМИН: ПОДТВЕРЖДЕНИЕ РЕГИСТРАЦИИ ==========
+async def confirm_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда для админа: /confirm номер_телефона"""
+    user_id = update.effective_user.id
+    
+    # Проверяем, что это админ
+    if user_id not in ADMIN_IDS:
+        await update.message.reply_text("❌ Bu komanda diňe admin üçin!")
         return
     
-    print("=" * 50)
-    print("ЗАПУСК БОТА С ОТСЛЕЖИВАНИЕМ")
-    print("=" * 50)
+    # Получаем телефон из команды
+    try:
+        phone = ' '.join(context.args)  # Объединяем аргументы в строку
+    except:
+        await update.message.reply_text("❌ Format: /confirm +99365123456")
+        return
     
-    # Создаем приложение
-    app = Application.builder().token(BOT_TOKEN).build()
+    # Очищаем телефон от лишних пробелов
+    phone = phone.strip()
     
-    # Добавляем команды
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("balance1", balance1_command))
-    app.add_handler(CommandHandler("balance2", balance2_command))
-    app.add_handler(CommandHandler("balance3", balance3_command))
-    app.add_handler(CommandHandler("all", balance_all_command))
-    app.add_handler(CommandHandler("track", track_command))
-    app.add_handler(CommandHandler("stop", stop_command))
-    app.add_handler(CommandHandler("status", status_command))
+    # Ищем пользователя с таким телефоном в pending_users
+    found_user_id = None
+    found_user_data = None
+    for uid, data in pending_users.items():
+        if data['phone'] == phone:
+            found_user_id = uid
+            found_user_data = data
+            break
     
-    print("✅ Команды зарегистрированы")
-    print("📋 Доступные команды: /balance1, /balance2, /balance3, /all, /track, /stop, /status")
-    print("🔄 JobQueue активен и готов к работе")
-    
-    # Запускаем бота
-    app.run_polling()
+    if found_user_id:
+        # Переносим из pending в registered
+        registered_users[found_user_id] = found_user_data
+        # Удаляем из pending
+        del pending_users[found_user_id]
+        
+        await update.message.reply_text(
+            f"✅ {phone} tassyklandy!\n"
+            f"Indi müşderi girip biler.\n"
+            f"Paroly: {found_user_data['password']}"
+        )
+        
+        # Отправляем уведомление пользователю
+        try:
+            await context.bot.send_message(
+                chat_id=found_user_id,
+                text=(
+                    f"✅ <b>REGISTRASIÝA TASSYKLANDY!</b>\n\n"
+                    f"📞 Siziň loginiňiz: {phone}\n"
+                    f"🔑 Siziň parolyňyz: <code>{found_user_data['password']}</code>\n\n"
+                    f"Indi /start basyp girip bilersiňiz.",
+                    parse_mode='HTML'
+                )
+            )
+        except:
+            pass
+    else:
+        await update.message.reply_text(f"❌ {phone} registrasiýa tapylmady")
 
-if __name__ == "__main__":
+# ========== КОМАНДА ДЛЯ ВХОДА ==========
+async def giris_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Команда /giris для входа"""
+    await update.message.reply_text(
+        "📝 <b>GIRIŞ</b>\n\n"
+        "Telefon nomeriňizi ýazyň:",
+        parse_mode='HTML'
+    )
+    return LOGIN_PHONE
+
+# ========== КНОПКА ПОДДЕРЖКИ ==========
+async def support_button(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработка кнопки поддержки - ТОЛЬКО ДЛЯ ПОДТВЕРЖДЁННЫХ"""
+    user_id = update.effective_user.id
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return
+    
+    support_text = (
+        f"🆘 <b>ÝARDAM HYZMATY</b>\n\n"
+        f"Näsazlyk ýüze çykan ýa-da soraglaryňyz bar bolsa, \n"
+        f"aşakdaky kontakt arkaly habarlaşyp bilersiňiz:\n\n"
+        f"📞 <b>{SUPPORT_USERNAME}</b>\n\n"
+        f"İş wagty: 24/7"
+    )
+    
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("📨 Habar ýazmak", url=f"https://t.me/{SUPPORT_USERNAME.replace('@', '')}")]
+    ])
+    
+    await update.message.reply_text(
+        support_text,
+        parse_mode='HTML',
+        reply_markup=keyboard
+    )
+
+# ========== ПОПОЛНЕНИЕ СЧЁТА (ТОЛЬКО ДЛЯ ПОДТВЕРЖДЁННЫХ) ==========
+async def deposit_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    reset_user_data(user_id)
+    user_data[user_id] = {'action': 'deposit'}
+    await update.message.reply_text("🔑 Parikara ID-nizi ýazyň:\n(Diňe sanlar)")
+    return PHONE_INPUT
+
+async def deposit_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    if user_id not in user_data or user_data[user_id].get('action') != 'deposit':
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if validate_parikara_id(text):
+        user_data[user_id]['parikara_id'] = text
+        await update.message.reply_text(
+            f"✅ ID kabul edildi: {text}\n\n"
+            "💵 Näçe TMT doldurmaly?\n"
+            "(Iň az 30 TMT, diňe san)"
+        )
+        return AMOUNT_INPUT
+    else:
+        await update.message.reply_text("❌ Ýalňyş! Diňe san giriziň.\nParikara ID-nizi täzeden ýazyň:")
+        return PHONE_INPUT
+
+async def deposit_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global app_counter
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    if user_id not in user_data or user_data[user_id].get('action') != 'deposit':
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if validate_amount(text):
+        amount = text
+        user_data[user_id]['amount'] = amount
+        app_id = app_counter
+        app_counter += 1
+        
+        reg_data = registered_users[user_id]
+        user = update.effective_user
+        username = user.username or "ýok"
+        
+        applications[app_id] = {
+            'id': app_id,
+            'user_id': user_id,
+            'username': username,
+            'first_name': user.first_name,
+            'type': 'deposit',
+            'parikara_id': user_data[user_id]['parikara_id'],
+            'amount': amount,
+            'phone': reg_data['phone'],
+            'time': datetime.now().strftime("%H:%M %d.%m.%Y"),
+            'status': 'waiting_phone'
+        }
+        
+        group_message = (
+            f"🆕 <b>TÄZE HAÝYŞ #{app_id}</b>\n\n"
+            f"👤 Klient: @{username}\n"
+            f"📞 Telefon: {reg_data['phone']}\n"
+            f"🆔 Parikara ID: {user_data[user_id]['parikara_id']}\n"
+            f"💰 Summa: {amount} TMT\n"
+            f"⏰ Wagt: {applications[app_id]['time']}\n\n"
+            f"<b>Telefon nomerini ugratmak üçin:</b>\n"
+            f"(Bu habara jogap edip 8 san ýazyň, mysal: 65656565)"
+        )
+        
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID, 
+            text=group_message,
+            parse_mode='HTML'
+        )
+        
+        await update.message.reply_text(
+            f"✅ Haýyşyňyz #{app_id} kabul edildi!\n\n"
+            "📞 Rekwizitleri garaşyň...\n\n"
+            f"🆘 Kömek gerek bolsa: {SUPPORT_USERNAME}"
+        )
+        
+        reset_user_data(user_id)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("❌ Ýalňyş summa! Iň az 30 TMT bolmaly.\nTäzeden ýazyň:")
+        return AMOUNT_INPUT
+
+# ========== ВЫВОД СРЕДСТВ (ТОЛЬКО ДЛЯ ПОДТВЕРЖДЁННЫХ) ==========
+async def withdraw_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    reset_user_data(user_id)
+    user_data[user_id] = {'action': 'withdraw'}
+    await update.message.reply_text("🔑 Parikara ID-nizi ýazyň:\n(Diňe sanlar)")
+    return WITHDRAW_PHONE_INPUT
+
+async def withdraw_phone(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    if user_id not in user_data or user_data[user_id].get('action') != 'withdraw':
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if validate_parikara_id(text):
+        user_data[user_id]['parikara_id'] = text
+        await update.message.reply_text(
+            f"✅ ID kabul edildi: {text}\n\n"
+            "💵 Näçe TMT çykarmaly?\n(Diňe san)"
+        )
+        return WITHDRAW_AMOUNT_INPUT
+    else:
+        await update.message.reply_text("❌ Ýalňyş! Diňe san giriziň.\nParikara ID-nizi täzeden ýazyň:")
+        return WITHDRAW_PHONE_INPUT
+
+async def withdraw_amount(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    if user_id not in user_data or user_data[user_id].get('action') != 'withdraw':
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if re.match(r'^\d+$', text):
+        amount = text
+        user_data[user_id]['amount'] = amount
+        await update.message.reply_text(
+            f"✅ Summa kabul edildi: {amount} TMT\n\n"
+            "📞 Telefon nomeriňizi ýazyň:\n"
+            "(8 san, mysal: 65123456)"
+        )
+        return WITHDRAW_RECEIPT_INPUT
+    else:
+        await update.message.reply_text("❌ Ýalňyş! Diňe san giriziň.\nTäzeden ýazyň:")
+        return WITHDRAW_AMOUNT_INPUT
+
+async def withdraw_receipt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global app_counter
+    user_id = update.effective_user.id
+    text = update.message.text.strip()
+    
+    if not is_registered(user_id):
+        await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+        return ConversationHandler.END
+    
+    if user_id not in user_data or user_data[user_id].get('action') != 'withdraw':
+        await update.message.reply_text("❌ Başdan başlamak üçin /start basyň.")
+        return ConversationHandler.END
+    
+    if validate_phone(text):
+        phone = format_phone(text)
+        user = update.effective_user
+        username = user.username or "ýok"
+        app_id = app_counter
+        app_counter += 1
+        
+        reg_data = registered_users[user_id]
+        
+        applications[app_id] = {
+            'id': app_id,
+            'user_id': user_id,
+            'username': username,
+            'first_name': user.first_name,
+            'type': 'withdraw',
+            'parikara_id': user_data[user_id]['parikara_id'],
+            'amount': user_data[user_id]['amount'],
+            'phone': phone,
+            'user_phone': reg_data['phone'],
+            'time': datetime.now().strftime("%H:%M %d.%m.%Y"),
+            'status': 'waiting_confirm'
+        }
+        
+        group_message = (
+            f"🔴 <b>TÄZE HAÝYŞ: PUL ÇYKARMAK #{app_id}</b>\n\n"
+            f"👤 Klient: @{username}\n"
+            f"📞 Telefon: {reg_data['phone']}\n"
+            f"🆔 Parikara ID: {user_data[user_id]['parikara_id']}\n"
+            f"💰 Summa: {user_data[user_id]['amount']} TMT\n"
+            f"📞 Klient nomeri: {phone}\n"
+            f"⏰ Wagt: {applications[app_id]['time']}\n\n"
+            f"<b>Pul geçirilenden soň:</b>"
+        )
+        
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Tassykla", callback_data=f"confirm_withdraw_{app_id}"),
+                InlineKeyboardButton("❌ Ret et", callback_data=f"reject_withdraw_{app_id}")
+            ]
+        ])
+        
+        await context.bot.send_message(
+            chat_id=GROUP_CHAT_ID, 
+            text=group_message,
+            parse_mode='HTML',
+            reply_markup=keyboard
+        )
+        
+        await update.message.reply_text(
+            f"✅ Haýyşyňyz #{app_id} kabul edildi!\n\n"
+            "💸 Pul çykarmak haýyşyňyz işlenilýär.\n\n"
+            f"🆘 Kömek gerek bolsa: {SUPPORT_USERNAME}"
+        )
+        
+        reset_user_data(user_id)
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text(
+            "❌ Ýalňyş telefon nomeri!\n"
+            "Dogry format: 65123456 (8 san)\n"
+            "Täzeden ýazyň:"
+        )
+        return WITHDRAW_RECEIPT_INPUT
+
+# ========== ОБРАБОТКА СООБЩЕНИЙ В ГРУППЕ ==========
+async def handle_group_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_chat.id != GROUP_CHAT_ID:
+        return
+    
+    text = update.message.text.strip()
+    
+    if re.match(r'^\d{8}$', text):
+        if update.message.reply_to_message:
+            original_text = update.message.reply_to_message.text or ""
+            match = re.search(r'#(\d+)', original_text)
+            if match:
+                app_id = int(match.group(1))
+                if app_id in applications:
+                    app = applications[app_id]
+                    
+                    if app['type'] == 'deposit':
+                        phone = format_phone(text)
+                        
+                        await context.bot.send_message(
+                            chat_id=app['user_id'],
+                            text=(
+                                f"📞 <b>REKWIZITLER #{app_id}</b>\n\n"
+                                f"💳 Nomer: <code>{phone}</code>\n"
+                                f"💰 Summa: {app['amount']} TMT\n\n"
+                                f"Töleg geçireniňizden soň skrinşoty ugradyň!\n\n"
+                                f"🆘 Kömek gerek bolsa: {SUPPORT_USERNAME}"
+                            ),
+                            parse_mode='HTML'
+                        )
+                        
+                        await update.message.reply_text(
+                            f"✔ Rekwizitler ugradyldy #{app_id}\n\n"
+                            f"👤 Klient: @{app['username']}\n"
+                            f"📞 Telefon: {app['phone']}\n"
+                            f"📞 Nomer: {phone}\n"
+                            f"💰 Summa: {app['amount']} TMT\n\n"
+                            f"Skrinşot garaşylýar..."
+                        )
+                        
+                        app['status'] = 'waiting_screenshot'
+                        app['sent_phone'] = phone
+                        return
+
+# ========== ОБРАБОТКА СКРИНШОТОВ ==========
+async def handle_screenshot(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.message.photo:
+        photo = update.message.photo[-1]
+        file_id = photo.file_id
+        user = update.effective_user
+        
+        if not is_registered(user.id):
+            await update.message.reply_text("❌ Öň registrasiýadan geçmeli! /start basyň.")
+            return
+        
+        user_app = None
+        for app_id, app in applications.items():
+            if app['user_id'] == user.id and app['status'] == 'waiting_screenshot':
+                user_app = app
+                break
+        
+        if user_app:
+            app_id = user_app['id']
+            applications[app_id]['screenshot_id'] = file_id
+            
+            keyboard = InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("✅ Tassykla", callback_data=f"approve_{app_id}"),
+                    InlineKeyboardButton("❌ Ret et", callback_data=f"reject_{app_id}")
+                ]
+            ])
+            
+            caption = (
+                f"🖼 <b>Skrinşot #{app_id}</b>\n\n"
+                f"👤 Klient: @{user_app['username']}\n"
+                f"📞 Telefon: {user_app['phone']}\n"
+                f"💰 Summa: {user_app['amount']} TMT"
+            )
+            
+            await context.bot.send_photo(
+                chat_id=GROUP_CHAT_ID,
+                photo=file_id,
+                caption=caption,
+                parse_mode='HTML',
+                reply_markup=keyboard
+            )
+            
+            await update.message.reply_text("✅ Skrinşot kabul edildi! Tassyklama garaşyň.")
+        else:
+            await update.message.reply_text("❌ Aktiw haýyş tapylmady")
+    else:
+        await update.message.reply_text("❌ Surat ugradyň!")
+
+# ========== ОБРАБОТКА КНОПОК ==========
+async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split('_')
+    action = data[0]
+    
+    if action == 'approve':
+        app_id = int(data[1])
+        
+        if app_id not in applications:
+            await query.edit_message_caption("❌ Bu haýyş tapylmady")
+            return
+        
+        app = applications[app_id]
+        app['status'] = 'completed'
+        
+        await context.bot.send_message(
+            chat_id=app['user_id'],
+            text=(
+                f"✅ <b>TÖLEG TASSYKLANDY #{app_id}</b>\n\n"
+                f"💰 Summa: {app['amount']} TMT\n\n"
+                f"🆘 Kömek gerek bolsa: {SUPPORT_USERNAME}"
+            ),
+            parse_mode='HTML'
+        )
+        
+        await query.edit_message_caption(
+            caption=query.message.caption + f"\n\n✅ <b>TASSYKLANDY #{app_id}</b>",
+            parse_mode='HTML'
+        )
+    
+    elif action == 'reject' and len(data) == 2:
+        app_id = int(data[1])
+        
+        if app_id not in applications:
+            await query.edit_message_caption("❌ Bu haýyş tapylmady")
+            return
+        
+        app = applications[app_id]
+        app['status'] = 'rejected'
+        
+        await context.bot.send_message(
+            chat_id=app['user_id'],
+            text=(
+                f"❌ <b>TÖLEG KABUL EDILMEDI #{app_id}</b>\n\n"
+                f"💰 Summa: {app['amount']} TMT\n\n"
+                f"Ýardam üçin: {SUPPORT_USERNAME}"
+            ),
+            parse_mode='HTML'
+        )
+        
+        await query.edit_message_caption(
+            caption=query.message.caption + f"\n\n❌ <b>RET EDILDI #{app_id}</b>",
+            parse_mode='HTML'
+        )
+    
+    elif action == 'confirm' and data[1] == 'withdraw':
+        app_id = int(data[2])
+        
+        if app_id not in applications:
+            await query.edit_message_text("❌ Bu haýyş tapylmady")
+            return
+        
+        app = applications[app_id]
+        app['status'] = 'completed'
+        
+        await context.bot.send_message(
+            chat_id=app['user_id'],
+            text=(
+                f"✅ <b>PUL ÇYKARYLDY #{app_id}</b>\n\n"
+                f"💰 Summa: {app['amount']} TMT\n\n"
+                f"Hyzmat üçin sag boluň! 🤝\n\n"
+                f"🆘 Kömek gerek bolsa: {SUPPORT_USERNAME}"
+            ),
+            parse_mode='HTML'
+        )
+        
+        await query.edit_message_text(
+            text=query.message.text + f"\n\n✅ <b>TASSYKLANDY #{app_id}</b>",
+            parse_mode='HTML'
+        )
+    
+    elif action == 'reject' and data[1] == 'withdraw':
+        app_id = int(data[2])
+        
+        if app_id not in applications:
+            await query.edit_message_text("❌ Bu haýyş tapylmady")
+            return
+        
+        app = applications[app_id]
+        app['status'] = 'rejected'
+        
+        await context.bot.send_message(
+            chat_id=app['user_id'],
+            text=(
+                f"❌ <b>PUL ÇYKARYLMADY #{app_id}</b>\n\n"
+                f"💰 Summa: {app['amount']} TMT\n\n"
+                f"Ýardam üçin: {SUPPORT_USERNAME}"
+            ),
+            parse_mode='HTML'
+        )
+        
+        await query.edit_message_text(
+            text=query.message.text + f"\n\n❌ <b>RET EDILDI #{app_id}</b>",
+            parse_mode='HTML'
+        )
+
+# ========== ОТМЕНА ==========
+async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    reset_user_data(user_id)
+    context.user_data.clear()
+    await update.message.reply_text("❌ Amal ýatyryldy.\nTäzeden başlamak üçin /start basyň.")
+    return ConversationHandler.END
+
+# ========== ЗАПУСК ==========
+def main():
+    web_thread = threading.Thread(target=run_flask, daemon=True)
+    web_thread.start()
+    time.sleep(2)
+    
+    print("=" * 60)
+    print("🤖 ASTRA KASSA BOT - DOLY VERSION")
+    print("📱 Işe başlady! 24/7 işleýär")
+    print("🔐 Registrasiýa: Parol diňe admin gruppa")
+    print("👤 Admin: /confirm +99365123456")
+    print("=" * 60)
+    
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ASK_CLIENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_client_answer)],
+            REG_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_phone)],
+            REG_PARIKARA_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, reg_parikara_id)],
+            LOGIN_PHONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_phone)],
+            LOGIN_PASSWORD: [MessageHandler(filters.TEXT & ~filters.COMMAND, login_password)],
+            PHONE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_phone)],
+            AMOUNT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, deposit_amount)],
+            WITHDRAW_PHONE_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_phone)],
+            WITHDRAW_AMOUNT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_amount)],
+            WITHDRAW_RECEIPT_INPUT: [MessageHandler(filters.TEXT & ~filters.COMMAND, withdraw_receipt)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel)]
+    )
+    
+    # Регистрируем обработчики
+    application.add_handler(conv_handler)
+    application.add_handler(CommandHandler("confirm", confirm_user))
+    application.add_handler(CommandHandler("giris", giris_command))
+    application.add_handler(MessageHandler(filters.Regex("^💰 Hasaby doldurmak$"), deposit_start))
+    application.add_handler(MessageHandler(filters.Regex("^💸 Pul çykarmak$"), withdraw_start))
+    application.add_handler(MessageHandler(filters.Regex("^🆘 Ýardam$"), support_button))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_screenshot))
+    application.add_handler(CallbackQueryHandler(handle_callback))
+    application.add_handler(MessageHandler(
+        filters.TEXT & filters.Chat(chat_id=GROUP_CHAT_ID) & ~filters.COMMAND,
+        handle_group_message
+    ))
+    
+    print("✅ Bot taýýar!")
+    print("👉 @Astrakassabot - /start")
+    print("=" * 60)
+    
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
+
+if __name__ == '__main__':
     main()
