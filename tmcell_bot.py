@@ -8,9 +8,9 @@ import os
 
 # ===== ВАШИ ДАННЫЕ =====
 # Токен лучше брать из переменных окружения Bothost
-BOT_TOKEN = os.environ.get('BOT_TOKEN', "ВАШ_ТОКЕН_БОТА_ОТ_BOTFATHER")
-TICELL_LOGIN = os.environ.get('TICELL_LOGIN', "99362489636")  # Ваш номер
-TICELL_PASSWORD = os.environ.get('TICELL_PASSWORD', "ВАШ_ПАРОЛЬ_ОТ_TMCELL")
+BOT_TOKEN = os.environ.get('BOT_TOKEN', "8291780121:AAEF-b3stiBvPs2VjVHnaApV1VIpA_y5--0")
+TICELL_LOGIN = os.environ.get('TICELL_LOGIN', "62489636")  # Ваш номер
+TICELL_PASSWORD = os.environ.get('TICELL_PASSWORD', "5873W295")
 # =======================
 
 # Включаем логирование
