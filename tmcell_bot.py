@@ -4,15 +4,21 @@ from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
 from bs4 import BeautifulSoup
 import time
+import os
 
-# ===== ВАШИ ДАННЫЕ (ЗАПОЛНИТЕ) =====
-BOT_TOKEN = "8291780121:AAEF-b3stiBvPs2VjVHnaApV1VIpA_y5--0"  # Вставьте токен от @BotFather
-TICELL_LOGIN = "99362489636"     # Ваш номер (как на скриншоте)
-TICELL_PASSWORD = "5873W295"   # Ваш пароль от кабинета
-# ====================================
+# ===== ВАШИ ДАННЫЕ =====
+# Токен лучше брать из переменных окружения Bothost
+BOT_TOKEN = os.environ.get('BOT_TOKEN', "ВАШ_ТОКЕН_БОТА_ОТ_BOTFATHER")
+TICELL_LOGIN = os.environ.get('TICELL_LOGIN', "99362489636")  # Ваш номер
+TICELL_PASSWORD = os.environ.get('TICELL_PASSWORD', "ВАШ_ПАРОЛЬ_ОТ_TMCELL")
+# =======================
 
 # Включаем логирование
-logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
+logging.basicConfig(
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
 
 def get_tmcell_balance():
     """
@@ -21,66 +27,93 @@ def get_tmcell_balance():
     session = requests.Session()
     
     try:
-        # Точные адреса с официального сайта
-        login_url = "https://hyzmat.tmcell.tm/"  # Страница входа
-        auth_url = "https://hyzmat.tmcell.tm/index.php"  # Куда отправляется форма
+        # Точные адреса с сайта
+        login_url = "https://hyzmat.tmcell.tm/"
+        auth_url = "https://hyzmat.tmcell.tm/User"
         
-        # Заголовки как у настоящего браузера
+        # Заголовки как у браузера
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'ru-RU,ru;q=0.9,en;q=0.8',
             'Content-Type': 'application/x-www-form-urlencoded',
             'Origin': 'https://hyzmat.tmcell.tm',
             'Referer': 'https://hyzmat.tmcell.tm/',
         }
         
-        # Сначала заходим на страницу, получаем куки
-        session.get(login_url, headers=headers)
+        # ШАГ 1: Заходим на главную страницу, чтобы получить токен
+        logger.info("Заходим на главную страницу...")
+        main_page = session.get(login_url, headers=headers)
         time.sleep(1)
         
-        # Данные для входа (согласно официальной документации)
-        # На сайте написано: вводите последние 8 цифр номера [citation:1]
-        login_digits = TICELL_LOGIN[-8:]  # Берем последние 8 цифр (62489636)
+        # Ищем токен в HTML
+        soup = BeautifulSoup(main_page.text, 'html.parser')
+        token_input = soup.find('input', {'name': '__RequestVerificationToken'})
         
+        if token_input:
+            verification_token = token_input.get('value', '')
+            logger.info(f"Токен получен: {verification_token[:20]}...")
+        else:
+            verification_token = ""
+            logger.warning("Токен не найден, пробуем без токена")
+        
+        # ШАГ 2: Подготавливаем данные для входа
+        # Берем последние 8 цифр номера (как требует сайт)
+        login_digits = TICELL_LOGIN[-8:]
+        logger.info(f"Логин для входа (последние 8 цифр): {login_digits}")
+        
+        # Данные для входа (точно как в форме)
         login_data = {
-            'login': login_digits,        # Только последние 8 цифр!
+            '__RequestVerificationToken': verification_token,
+            'login': login_digits,
             'password': TICELL_PASSWORD,
-            'enter': 'Вход'               # Кнопка отправки
         }
         
-        # Отправляем POST запрос на вход
+        # ШАГ 3: Отправляем POST запрос на вход
+        logger.info("Отправляем POST запрос на /User...")
         login_response = session.post(auth_url, data=login_data, headers=headers, allow_redirects=True)
+        
+        logger.info(f"Статус ответа: {login_response.status_code}")
         
         if login_response.status_code != 200:
             return None, f"Ошибка входа: код {login_response.status_code}"
         
-        # После успешного входа мы на странице профиля
-        # Ищем баланс
+        # ШАГ 4: Ищем баланс на странице
         soup = BeautifulSoup(login_response.text, 'html.parser')
         
-        # На скриншоте баланс в формате "Баланс контракта: 564,78 manat"
+        # Ищем элемент с балансом (по тексту "Баланс контракта")
         balance_text = None
-        
-        # Ищем везде, где есть текст "Баланс контракта"
-        for element in soup.find_all(['div', 'span', 'td', 'p', 'h3']):
-            if element.text and ('Баланс контракта' in element.text or 'баланс' in element.text.lower()):
+        for element in soup.find_all(['div', 'span', 'td', 'p', 'h3', 'label', 'strong']):
+            if element.text and ('Баланс контракта' in element.text):
                 balance_text = element.text.strip()
+                logger.info(f"Найден баланс: {balance_text}")
                 break
         
+        # Если не нашли по первому способу, ищем просто слово "баланс"
+        if not balance_text:
+            for element in soup.find_all(['div', 'span', 'td', 'p']):
+                if element.text and 'баланс' in element.text.lower():
+                    balance_text = element.text.strip()
+                    logger.info(f"Найден баланс (по слову баланс): {balance_text}")
+                    break
+        
         if balance_text:
-            # Очищаем от лишнего и возвращаем
             return balance_text, None
         else:
-            # Если не нашли, покажем весь текст страницы для отладки
-            return None, "Не удалось найти баланс. Проверьте логин/пароль."
+            # Если совсем не нашли, сохраняем страницу для отладки
+            with open('debug_page.html', 'w', encoding='utf-8') as f:
+                f.write(login_response.text)
+            logger.info("Страница сохранена в debug_page.html")
+            
+            return None, "Не удалось найти баланс на странице. Проверьте логин/пароль."
             
     except Exception as e:
-        return None, f"Ошибка: {str(e)}"
+        logger.error(f"Ошибка: {str(e)}")
+        return None, f"Ошибка при проверке: {str(e)}"
 
 async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /balance"""
-    await update.message.reply_text("🔍 Проверяю баланс TMCell...")
+    await update.message.reply_text("🔍 Проверяю баланс TMCell, подождите...")
     
     balance, error = get_tmcell_balance()
     
@@ -92,15 +125,24 @@ async def balance_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Обработчик команды /start"""
     await update.message.reply_text(
-        "👋 Привет! Я бот для проверки баланса TMCell.\n"
-        "Просто отправь команду /balance и я покажу текущий баланс."
+        "👋 Привет! Я бот для проверки баланса TMCell.\n\n"
+        "Команды:\n"
+        "/balance - проверить текущий баланс\n"
+        "/start - показать это сообщение"
     )
 
 def main():
     """Запуск бота"""
     # Проверяем, что токен введен
-    if BOT_TOKEN == "ТОКЕН_ВАШЕГО_БОТА":
+    if BOT_TOKEN == "ВАШ_ТОКЕН_БОТА_ОТ_BOTFATHER":
+        logger.error("ОШИБКА: Вставьте свой токен бота в переменную BOT_TOKEN!")
         print("❌ ОШИБКА: Вставьте свой токен бота в переменную BOT_TOKEN!")
+        return
+    
+    # Проверяем пароль
+    if TICELL_PASSWORD == "ВАШ_ПАРОЛЬ_ОТ_TMCELL":
+        logger.error("ОШИБКА: Вставьте свой пароль от TMcell!")
+        print("❌ ОШИБКА: Вставьте свой пароль от TMcell!")
         return
     
     # Создаем бота
@@ -110,7 +152,10 @@ def main():
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("balance", balance_command))
     
-    print("✅ Бот запущен! Напиши своему боту: /balance")
+    logger.info("✅ Бот запущен!")
+    print("✅ Бот запущен! Нажми Ctrl+C для остановки")
+    
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
