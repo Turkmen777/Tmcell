@@ -1,6 +1,6 @@
 import logging
 from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, JobQueue
+from telegram.ext import Application, CommandHandler, ContextTypes
 import requests
 from bs4 import BeautifulSoup
 import time
@@ -12,7 +12,7 @@ from datetime import datetime
 # ===== ВАШИ ДАННЫЕ ДЛЯ 3 НОМЕРОВ =====
 BOT_TOKEN = os.environ.get('BOT_TOKEN', "7635918525:AAFp6g0sna1Mq59NiaWVk_tdHq8O5P9_3HY")
 
-# Номер 1 (ваш основной)
+# Номер 1
 LOGIN1 = "62489636"
 PASSWORD1 = "5873W295"
 
@@ -25,8 +25,9 @@ LOGIN3 = "65136133"
 PASSWORD3 = "L6GL4279"
 # ======================================
 
-# Файл для хранения предыдущих балансов
+# Файлы для хранения данных
 BALANCE_FILE = "balances.json"
+TRACKING_FILE = "tracking.json"
 
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", 
@@ -34,23 +35,23 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-def load_balances():
-    """Загружает сохраненные балансы из файла"""
+def load_json(filename):
+    """Загружает данные из JSON файла"""
     try:
-        if os.path.exists(BALANCE_FILE):
-            with open(BALANCE_FILE, 'r', encoding='utf-8') as f:
+        if os.path.exists(filename):
+            with open(filename, 'r', encoding='utf-8') as f:
                 return json.load(f)
     except Exception as e:
-        logger.error(f"Ошибка загрузки балансов: {e}")
+        logger.error(f"Ошибка загрузки {filename}: {e}")
     return {}
 
-def save_balances(balances):
-    """Сохраняет балансы в файл"""
+def save_json(filename, data):
+    """Сохраняет данные в JSON файл"""
     try:
-        with open(BALANCE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(balances, f, ensure_ascii=False, indent=2)
+        with open(filename, 'w', encoding='utf-8') as f:
+            json.dump(data, f, ensure_ascii=False, indent=2)
     except Exception as e:
-        logger.error(f"Ошибка сохранения балансов: {e}")
+        logger.error(f"Ошибка сохранения {filename}: {e}")
 
 def get_tmcell_balance(login, password):
     """Функция для получения баланса для конкретного номера"""
@@ -99,7 +100,6 @@ def get_tmcell_balance(login, password):
                 # Извлекаем сумму
                 amount_match = re.search(r'([\d]+,[\d]+)', balance_text)
                 if amount_match:
-                    # Преобразуем строку с запятой в число (заменяем запятую на точку)
                     amount_str = amount_match.group(1).replace(',', '.')
                     amount = float(amount_str)
                     return amount, balance_text, None
@@ -111,12 +111,14 @@ def get_tmcell_balance(login, password):
         logger.error(f"Ошибка: {str(e)}")
         return None, None, f"Ошибка: {str(e)}"
 
-async def check_balances(context: ContextTypes.DEFAULT_TYPE):
-    """Проверяет балансы всех номеров и отправляет уведомления о пополнениях"""
+async def check_balances_job(context: ContextTypes.DEFAULT_TYPE):
+    """Проверяет балансы и отправляет уведомления о пополнениях"""
     chat_id = context.job.chat_id
-    saved_balances = load_balances()
     
-    # Список номеров для проверки
+    logger.info(f"Автоматическая проверка для чата {chat_id}")
+    
+    saved_balances = load_json(BALANCE_FILE)
+    
     numbers = [
         {"name": "Номер 1", "login": LOGIN1, "password": PASSWORD1, "full": f"993{LOGIN1}"},
         {"name": "Номер 2", "login": LOGIN2, "password": PASSWORD2, "full": f"993{LOGIN2}"},
@@ -157,12 +159,74 @@ async def check_balances(context: ContextTypes.DEFAULT_TYPE):
             logger.error(f"Ошибка проверки {number['name']}: {e}")
     
     # Сохраняем обновленные балансы
-    save_balances(saved_balances)
+    save_json(BALANCE_FILE, saved_balances)
     
     # Отправляем уведомления, если есть
     if notifications:
         message = "🔔 <b>Обнаружены пополнения баланса!</b>\n\n" + "\n\n".join(notifications)
         await context.bot.send_message(chat_id=chat_id, text=message, parse_mode="HTML")
+
+async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Включает отслеживание пополнений"""
+    chat_id = update.effective_chat.id
+    
+    # Удаляем старые задачи для этого чата
+    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    for job in current_jobs:
+        job.schedule_removal()
+    
+    # Создаем новую задачу - проверка каждые 15 минут
+    context.job_queue.run_repeating(
+        check_balances_job,
+        interval=900,  # 15 минут = 900 секунд
+        first=5,       # первый раз через 5 секунд
+        chat_id=chat_id,
+        name=str(chat_id)
+    )
+    
+    # Проверяем баланс сразу же
+    await update.message.reply_text("🔄 Первая проверка баланса...")
+    
+    numbers = [
+        {"name": "Номер 1", "login": LOGIN1, "password": PASSWORD1, "full": f"993{LOGIN1}"},
+        {"name": "Номер 2", "login": LOGIN2, "password": PASSWORD2, "full": f"993{LOGIN2}"},
+        {"name": "Номер 3", "login": LOGIN3, "password": PASSWORD3, "full": f"993{LOGIN3}"},
+    ]
+    
+    saved_balances = load_json(BALANCE_FILE)
+    results = []
+    
+    for number in numbers:
+        amount, _, error = get_tmcell_balance(number["login"], number["password"])
+        if error:
+            results.append(f"❌ {number['name']}: {error}")
+        else:
+            results.append(f"✅ {number['name']}: {amount:.2f} manat")
+            saved_balances[number["login"]] = amount
+    
+    save_json(BALANCE_FILE, saved_balances)
+    
+    await update.message.reply_text(
+        f"✅ <b>Отслеживание пополнений включено!</b>\n"
+        f"Буду проверять баланс каждые 15 минут.\n\n"
+        f"📊 Текущие балансы:\n" + "\n".join(results),
+        parse_mode="HTML"
+    )
+
+async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Выключает отслеживание пополнений"""
+    chat_id = update.effective_chat.id
+    
+    # Удаляем задачи для этого чата
+    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
+    for job in current_jobs:
+        job.schedule_removal()
+    
+    await update.message.reply_text(
+        "🔕 <b>Отслеживание пополнений выключено</b>\n"
+        "Чтобы снова включить, отправьте /track",
+        parse_mode="HTML"
+    )
 
 async def balance1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Баланс для номера 1"""
@@ -174,6 +238,11 @@ async def balance1_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Номер 1: {error}")
     else:
         if amount:
+            # Сохраняем баланс
+            balances = load_json(BALANCE_FILE)
+            balances[LOGIN1] = amount
+            save_json(BALANCE_FILE, balances)
+            
             await update.message.reply_text(
                 f"📱 <b>Номер 1: 993{LOGIN1}</b>\n"
                 f"💰 {amount:.2f} manat",
@@ -193,6 +262,10 @@ async def balance2_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Номер 2: {error}")
     else:
         if amount:
+            balances = load_json(BALANCE_FILE)
+            balances[LOGIN2] = amount
+            save_json(BALANCE_FILE, balances)
+            
             await update.message.reply_text(
                 f"📱 <b>Номер 2: 993{LOGIN2}</b>\n"
                 f"💰 {amount:.2f} manat",
@@ -212,6 +285,10 @@ async def balance3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Номер 3: {error}")
     else:
         if amount:
+            balances = load_json(BALANCE_FILE)
+            balances[LOGIN3] = amount
+            save_json(BALANCE_FILE, balances)
+            
             await update.message.reply_text(
                 f"📱 <b>Номер 3: 993{LOGIN3}</b>\n"
                 f"💰 {amount:.2f} manat",
@@ -226,7 +303,7 @@ async def balance_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE
     msg = await update.message.reply_text("🔄 Проверяю все номера...")
     
     results = []
-    saved_balances = load_balances()
+    saved_balances = load_json(BALANCE_FILE)
     
     # Номер 1
     amount1, _, error1 = get_tmcell_balance(LOGIN1, PASSWORD1)
@@ -253,7 +330,7 @@ async def balance_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         saved_balances[LOGIN3] = amount3
     
     # Сохраняем балансы
-    save_balances(saved_balances)
+    save_json(BALANCE_FILE, saved_balances)
     
     # Отправляем общий результат
     final_message = "📊 <b>Балансы всех номеров</b>\n\n" + "\n".join(results)
@@ -273,42 +350,6 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "/start - показать это сообщение",
         parse_mode="HTML"
     )
-
-async def track_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Включает отслеживание пополнений"""
-    chat_id = update.effective_chat.id
-    
-    # Удаляем старые задачи для этого чата
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-    for job in current_jobs:
-        job.schedule_removal()
-    
-    # Создаем новую задачу - проверка каждые 15 минут
-    context.job_queue.run_repeating(
-        check_balances,
-        interval=900,  # 15 минут = 900 секунд
-        first=10,  # первый раз через 10 секунд
-        chat_id=chat_id,
-        name=str(chat_id)
-    )
-    
-    await update.message.reply_text(
-        "✅ <b>Отслеживание пополнений включено!</b>\n"
-        "Я буду проверять баланс каждые 15 минут.\n"
-        "Если баланс увеличится на 20+ manat - сразу сообщу.",
-        parse_mode="HTML"
-    )
-
-async def stop_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Выключает отслеживание пополнений"""
-    chat_id = update.effective_chat.id
-    
-    # Удаляем задачи для этого чата
-    current_jobs = context.job_queue.get_jobs_by_name(str(chat_id))
-    for job in current_jobs:
-        job.schedule_removal()
-    
-    await update.message.reply_text("🔕 <b>Отслеживание пополнений выключено</b>", parse_mode="HTML")
 
 def main():
     """Запуск бота"""
@@ -330,7 +371,9 @@ def main():
     
     print("✅ Бот для 3 номеров с отслеживанием пополнений запущен!")
     print("Команды: /balance1, /balance2, /balance3, /all, /track, /stop")
+    print("🕒 Автоматическая проверка каждые 15 минут (для платного тарифа)")
     
+    # Запускаем бота
     app.run_polling()
 
 if __name__ == "__main__":
