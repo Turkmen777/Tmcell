@@ -9,7 +9,7 @@ import re
 import json
 from datetime import datetime
 
-# ===== ВАШИ ДАННЫЕ ДЛЯ 5 НОМЕРОВ =====
+# ===== ВАШИ ДАННЫЕ ДЛЯ 7 НОМЕРОВ =====
 BOT_TOKEN = os.environ.get('BOT_TOKEN', "7635918525:AAFp6g0sna1Mq59NiaWVk_tdHq8O5P9_3HY")
 
 # Номер 1
@@ -24,13 +24,21 @@ PASSWORD2 = "W16G8SL1"
 LOGIN3 = "65136133"
 PASSWORD3 = "L6GL4279"
 
-# Номер 4 (НОВЫЙ)
+# Номер 4
 LOGIN4 = "71232849"
 PASSWORD4 = "G8G6LW8W"
 
-# Номер 5 (НОВЫЙ)
+# Номер 5
 LOGIN5 = "71235957"
 PASSWORD5 = "9872GR3R"
+
+# Номер 6 (НОВЫЙ)
+LOGIN6 = "62305766"
+PASSWORD6 = "1363646G"
+
+# Номер 7 (НОВЫЙ)
+LOGIN7 = "65937319"
+PASSWORD7 = "1234567"
 # ======================================
 
 # Файл для хранения предыдущих балансов
@@ -123,13 +131,15 @@ async def check_balances(context: ContextTypes.DEFAULT_TYPE):
     chat_id = context.job.chat_id
     saved_balances = load_balances()
     
-    # Список всех 5 номеров
+    # Список всех 7 номеров
     numbers = [
         {"name": "Номер 1", "login": LOGIN1, "password": PASSWORD1, "full": f"993{LOGIN1}"},
         {"name": "Номер 2", "login": LOGIN2, "password": PASSWORD2, "full": f"993{LOGIN2}"},
         {"name": "Номер 3", "login": LOGIN3, "password": PASSWORD3, "full": f"993{LOGIN3}"},
         {"name": "Номер 4", "login": LOGIN4, "password": PASSWORD4, "full": f"993{LOGIN4}"},
         {"name": "Номер 5", "login": LOGIN5, "password": PASSWORD5, "full": f"993{LOGIN5}"},
+        {"name": "Номер 6", "login": LOGIN6, "password": PASSWORD6, "full": f"993{LOGIN6}"},
+        {"name": "Номер 7", "login": LOGIN7, "password": PASSWORD7, "full": f"993{LOGIN7}"},
     ]
     
     notifications = []
@@ -231,7 +241,7 @@ async def balance3_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📱 Номер 3: 993{LOGIN3}\n💰 {clean_balance}")
 
 async def balance4_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Баланс для номера 4 (71232849) - НОВЫЙ"""
+    """Баланс для номера 4 (71232849)"""
     await update.message.reply_text("🔍 Проверяю баланс для номера 4...")
     
     amount, full_text, error = get_tmcell_balance(LOGIN4, PASSWORD4)
@@ -250,7 +260,7 @@ async def balance4_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(f"📱 Номер 4: 993{LOGIN4}\n💰 {clean_balance}")
 
 async def balance5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Баланс для номера 5 (71235957) - НОВЫЙ"""
+    """Баланс для номера 5 (71235957)"""
     await update.message.reply_text("🔍 Проверяю баланс для номера 5...")
     
     amount, full_text, error = get_tmcell_balance(LOGIN5, PASSWORD5)
@@ -268,9 +278,47 @@ async def balance5_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             clean_balance = full_text.replace("Баланс контракта:", "").strip()
             await update.message.reply_text(f"📱 Номер 5: 993{LOGIN5}\n💰 {clean_balance}")
 
+async def balance6_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Баланс для номера 6 (62305766) - НОВЫЙ"""
+    await update.message.reply_text("🔍 Проверяю баланс для номера 6...")
+    
+    amount, full_text, error = get_tmcell_balance(LOGIN6, PASSWORD6)
+    
+    if error:
+        await update.message.reply_text(f"❌ Номер 6: {error}")
+    else:
+        if amount:
+            await update.message.reply_text(
+                f"📱 <b>Номер 6: 993{LOGIN6}</b>\n"
+                f"💰 {amount:.2f} manat",
+                parse_mode="HTML"
+            )
+        else:
+            clean_balance = full_text.replace("Баланс контракта:", "").strip()
+            await update.message.reply_text(f"📱 Номер 6: 993{LOGIN6}\n💰 {clean_balance}")
+
+async def balance7_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Баланс для номера 7 (65937319) - НОВЫЙ"""
+    await update.message.reply_text("🔍 Проверяю баланс для номера 7...")
+    
+    amount, full_text, error = get_tmcell_balance(LOGIN7, PASSWORD7)
+    
+    if error:
+        await update.message.reply_text(f"❌ Номер 7: {error}")
+    else:
+        if amount:
+            await update.message.reply_text(
+                f"📱 <b>Номер 7: 993{LOGIN7}</b>\n"
+                f"💰 {amount:.2f} manat",
+                parse_mode="HTML"
+            )
+        else:
+            clean_balance = full_text.replace("Баланс контракта:", "").strip()
+            await update.message.reply_text(f"📱 Номер 7: 993{LOGIN7}\n💰 {clean_balance}")
+
 async def balance_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Проверить баланс всех 5 номеров"""
-    msg = await update.message.reply_text("🔄 Проверяю все 5 номеров...")
+    """Проверить баланс всех 7 номеров"""
+    msg = await update.message.reply_text("🔄 Проверяю все 7 номеров...")
     
     results = []
     saved_balances = load_balances()
@@ -315,24 +363,42 @@ async def balance_all_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         results.append(f"✅ Номер 5: {amount5:.2f} manat")
         saved_balances[LOGIN5] = amount5
     
+    # Номер 6
+    amount6, _, error6 = get_tmcell_balance(LOGIN6, PASSWORD6)
+    if error6:
+        results.append(f"❌ Номер 6: {error6}")
+    else:
+        results.append(f"✅ Номер 6: {amount6:.2f} manat")
+        saved_balances[LOGIN6] = amount6
+    
+    # Номер 7
+    amount7, _, error7 = get_tmcell_balance(LOGIN7, PASSWORD7)
+    if error7:
+        results.append(f"❌ Номер 7: {error7}")
+    else:
+        results.append(f"✅ Номер 7: {amount7:.2f} manat")
+        saved_balances[LOGIN7] = amount7
+    
     # Сохраняем балансы
     save_balances(saved_balances)
     
     # Отправляем общий результат
-    final_message = "📊 <b>Балансы всех 5 номеров</b>\n\n" + "\n".join(results)
+    final_message = "📊 <b>Балансы всех 7 номеров</b>\n\n" + "\n".join(results)
     await msg.edit_text(final_message, parse_mode="HTML")
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда старт с описанием"""
     await update.message.reply_text(
-        "👋 <b>Бот баланса TMCell для 5 номеров</b>\n\n"
+        "👋 <b>Бот баланса TMCell для 7 номеров</b>\n\n"
         "📱 <b>Команды для проверки:</b>\n"
         "/balance1 - номер 99362489636\n"
         "/balance2 - номер 99361416500\n"
         "/balance3 - номер 99365136133\n"
         "/balance4 - номер 99371232849\n"
         "/balance5 - номер 99371235957\n"
-        "/all - баланс всех 5 номеров сразу\n\n"
+        "/balance6 - номер 99362305766\n"
+        "/balance7 - номер 99365937319\n"
+        "/all - баланс всех 7 номеров сразу\n\n"
         "🔔 <b>Отслеживание пополнений:</b>\n"
         "/track - включить (проверка каждые 15 мин)\n"
         "/stop - выключить\n"
@@ -401,7 +467,7 @@ def main():
         return
     
     print("=" * 50)
-    print("ЗАПУСК БОТА ДЛЯ 5 НОМЕРОВ")
+    print("ЗАПУСК БОТА ДЛЯ 7 НОМЕРОВ")
     print("=" * 50)
     print("✅ Номера:")
     print(f"   1: 993{LOGIN1}")
@@ -409,6 +475,8 @@ def main():
     print(f"   3: 993{LOGIN3}")
     print(f"   4: 993{LOGIN4}")
     print(f"   5: 993{LOGIN5}")
+    print(f"   6: 993{LOGIN6}")
+    print(f"   7: 993{LOGIN7}")
     print("=" * 50)
     
     # Создаем приложение
@@ -421,6 +489,8 @@ def main():
     app.add_handler(CommandHandler("balance3", balance3_command))
     app.add_handler(CommandHandler("balance4", balance4_command))
     app.add_handler(CommandHandler("balance5", balance5_command))
+    app.add_handler(CommandHandler("balance6", balance6_command))
+    app.add_handler(CommandHandler("balance7", balance7_command))
     app.add_handler(CommandHandler("all", balance_all_command))
     app.add_handler(CommandHandler("track", track_command))
     app.add_handler(CommandHandler("stop", stop_command))
@@ -428,7 +498,7 @@ def main():
     
     print("✅ Команды зарегистрированы")
     print("📋 Доступные команды:")
-    print("   /balance1, /balance2, /balance3, /balance4, /balance5")
+    print("   /balance1, /balance2, /balance3, /balance4, /balance5, /balance6, /balance7")
     print("   /all, /track, /stop, /status")
     print("🔄 JobQueue активен")
     print("=" * 50)
